@@ -1,3 +1,4 @@
+
 $glob = @{
    dir = "c:\GosZakup.DB\"
    Days = 20
