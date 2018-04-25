@@ -32,71 +32,13 @@ function cdir($Path) {
    $Path
 }
 
-function Check-Proxy($url, $debug){
-   if(-not $url){$url = "http://ya.ru"}
-   $try = $true
+function Check-Proxy(){
 
-   $cnt = 0
-
-
-   while($try)
+   $settingproxy = cat "$($glob.dir)proxy.txt"|?{-not $_.StartsWith("#")}| select -first 1
+   
+   if($settingproxy)
    {
-      $cnt++
-      try {
-         if($debug) { Write-Host "" }
-         if($debug) { Write-Host "===========" }
-         if($debug) { Write-Host "$cnt try  to connect $url" }
-         Invoke-WebRequest -Uri $url | out-null
-         if($debug) { Write-Host "$cnt Success" }
-         $try = $false
-      }
-      catch {
-         if($debug) { Write-Host "$cnt $($_.Exception)" }
-
-         if(-not [System.Net.WebRequest]::DefaultWebProxy)
-         {
-            [System.Net.WebRequest]::DefaultWebProxy = [System.Net.WebRequest]::GetSystemWebProxy()
-            if(-not [System.Net.WebRequest]::DefaultWebProxy)
-            {
-               throw "GetSystemWebProxy returns null"
-            }
-            continue
-         }
-
-         $proxy = [System.Net.WebRequest]::DefaultWebProxy.GetProxy($url).AbsoluteUri
-
-         if($debug) { Write-Host "$cnt proxy $proxy" }
-
-         if(-not $proxy)
-         {
-            throw "no proxy found. May be $url is down?"
-         }
-         elseif(-not [System.Net.WebRequest]::DefaultWebProxy -or [System.Net.WebRequest]::DefaultWebProxy.GetType().Name -Match "Wrapper")
-         {
-            if($debug) { Write-Host "$cnt WebProxyWrapper --> WebProxy" }
-            [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy($proxy)
-         }
-         else
-         {
-            if($debug) { Write-Host "$cnt trying set credential" }
-            try
-            {
-               $cred = Get-Credential -Credential "$env:USERDOMAIN\$env:USERNAME"
-            }
-            catch
-            {
-               throw "Cancelled"
-            }
-            if($cred.Password.Length)
-            {
-               [System.Net.WebRequest]::DefaultWebProxy.Credentials = $cred
-            }
-            else
-            {
-               throw "empty pass. Exiting"
-            }
-         }
-      }
+      [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy($settingproxy)
    }
 }
 
@@ -210,6 +152,7 @@ function filterZK44($ZK44_Object) {
 function ReadZips() {
    if(!$glob.ZK44_Objects)
    {
+      write-host("   ReadZips start")
       $glob.ZK44_Objects = @{}
 
       dir "$(FtpStore)*.zip" |%{
@@ -238,6 +181,7 @@ function ReadZips() {
             $_.value.is_Double = $true
          }
       }
+      write-host("   ReadZips end")
    }
 
    $glob.ZK44_Objects.values|%{$_.values}
@@ -304,12 +248,12 @@ function DownloadAttachments{
       $errorOccured = $false
       $notify = $_
 
+
       $attachments = $_.attachments |%{
          try {
             $url = $_.url
-      [System.Threading.Thread]::Sleep(1000)
+            [System.Threading.Thread]::Sleep(1000)
             @{
-      
                content = (Invoke-WebRequest -Method "get" -Uri $url).Content
                fileName = $_.filename
             }
@@ -331,7 +275,15 @@ function DownloadAttachments{
          [System.IO.File]::WriteAllBytes("$path\$($_.fileName)", $_.Content)
       }
       $_|ConvertTo-Json -Depth 50 |Out-File "$path\info.txt"
+      readSrcXml $_ |Out-File "$path\info.xml"
    }
+}
+
+function readSrcXml ($notify)
+{
+   $zip = [System.IO.Compression.ZipFile]::Open("$(FtpStore)$($notify.zipFile)","Read")
+   $entry = $zip.Entries |?{$_.FullName -match $notify.reqFile} | select -first 1 
+   StreamToString $entry.Open()
 }
 
 function ClearAttachments {
@@ -427,13 +379,18 @@ function makeHtm {
 }
 
 function _Do {
+   "init"
    Init
+   "SaveFtpZips"
    SaveFtpZips
+   "ClearFtpZips"
    ClearFtpZips
    # ReadZips |select -Property is_Good,regNumber,notifyId,maxPrice,dateOpen,purchaseObjectInfo,po_names,po_OKPD2s,po_OKPD2codes,attachmentsStr,ZipFile,is_Double | ogv
    # analizeOKPD2 |ogv
+   "DownloadAttachments"
    DownloadAttachments
    #ClearAttachments
+   "makeHtm"
    makeHtm |Out-File "$($glob.dir)index.htm" -Encoding UTF8
 
 }
@@ -441,14 +398,9 @@ function _Do {
 _Do
 <#
 TODO
-сохранить исходный xml
-сделать открытие папочки + ифрейм с просмотром
-шт-кг-ед
 инфа для подачи заявки
 окдп2 фильтр все неподходят, а не одна
 разделитель между заявками
-сортировка по открытию
 фильтр на дату создания
 ссылки открыть в новой вкладке
-обрезать аттачи
 #>
