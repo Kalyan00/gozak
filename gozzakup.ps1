@@ -32,13 +32,32 @@ function cdir($Path) {
    $Path
 }
 
+function RoundRobinProxy ($text) {
+   while($glob.proxyList){
+      $proxy = $glob.proxyList | select -first 1
+      write-host "$text   new proxy:$proxy"
+      [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy("http://$proxy")
+      $glob.proxyList = $glob.proxyList | select -Skip 1
+      try {
+         if("$((Invoke-WebRequest -Uri "https://clients5.google.com/pagead/drt/dn/" -TimeoutSec 1 -Method "GET").content )".Length -eq 140)
+         {
+            return $true
+            break
+         }
+      }
+      catch { }
+   }
+   return $false
+}
+
 function Check-Proxy(){
 
-   $settingproxy = cat "$($glob.dir)proxy.txt"|?{-not $_.StartsWith("#")}| select -first 1
+   $settingproxy = cat "$($glob.dir)proxy.txt"|?{-not $_.StartsWith("#")}
    
    if($settingproxy)
    {
-      [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy($settingproxy)
+      $glob.proxyList = $settingproxy
+      RoundRobinProxy | out-null
    }
 }
 
@@ -210,6 +229,8 @@ function ReadZips_internal($xml,$zipFile,$reqFile) {
       }|DictToObj
    }
    $dateOpen = [DateTime]$xml.DocumentElement.fcsNotificationZK.procedureInfo.opening.date
+   $datePublish = [DateTime]$xml.DocumentElement.fcsNotificationZK.docPublishDate
+   $dateCollecting = [DateTime]$xml.DocumentElement.fcsNotificationZK.procedureInfo.collecting.startDate
 
    $result = @{
       zipFile = $zipFile
@@ -224,6 +245,14 @@ function ReadZips_internal($xml,$zipFile,$reqFile) {
       attachmentsStr = "$($attachments.Length):`r`n$(String-Join "`r`n" ($attachments|%{$_.fileName}))"
       dateOpen = $dateOpen
       dateOpenStr = $dateOpen.ToString("dd.MM.yyyy hh:mm")
+      dateCollecting = $dateCollecting
+      dateCollectingStr = $dateCollecting.ToString("dd.MM.yyyy hh:mm")
+      datePublish = $datePublish
+      datePublishStr = $datePublish.ToString("dd.MM.yyyy hh:mm")
+      collectingPlace = $xml.DocumentElement.fcsNotificationZK.procedureInfo.collecting.place
+      openingPlace = $xml.DocumentElement.fcsNotificationZK.procedureInfo.opening.place
+      printform = $xml.DocumentElement.fcsNotificationZK.printForm.url
+
       purchaseObjects = $purchaseObjects
       po_OKPD2s = String-Join "`r`n" ($purchaseObjects |%{$_.OKPD2}|select -unique)
       po_OKPD2codes = String-Join "`r`n" ($purchaseObjects |%{$_.OKPD2Code}|select -unique)
@@ -249,12 +278,11 @@ function DownloadAttachments{
       $notify = $_
 
 
-      $attachments = $_.attachments |%{
+      $attachments = $_.attachments,@{url=($_.printform -replace ("/viewXml.h","/view.h")); filename="printForm.html"} |%{$_}  |%{
          try {
             $url = $_.url
-            [System.Threading.Thread]::Sleep(1000)
             @{
-               content = (Invoke-WebRequest -Method "get" -Uri $url).Content
+               content = GetContent $url
                fileName = $_.filename
             }
          }
@@ -272,15 +300,51 @@ function DownloadAttachments{
       if($errorOccured) { return }
       mkdir $path |out-null
       $attachments|%{
-         [System.IO.File]::WriteAllBytes("$path\$($_.fileName)", $_.Content)
+         if($_.content.gettype() -eq [String]){
+            [System.IO.File]::WriteAllText("$path\$($_.fileName)", $_.Content,[System.Text.Encoding]::UTF8)
+         }
+         else { 
+            [System.IO.File]::WriteAllBytes("$path\$($_.fileName)", $_.Content)
+         }
       }
       $_|ConvertTo-Json -Depth 50 |Out-File "$path\info.txt"
       readSrcXml $_ |Out-File "$path\info.xml"
    }
+
+   write-host "downloaded requests:$($glob.SuccessAttachmentsCount) size:$([int]($glob.SuccessAttachmentsSize/1024/1024))Mb"
 }
 
-function readSrcXml ($notify)
-{
+function GetContent($url) {
+   $iterate = $true
+   while($iterate){
+      try {
+         
+         # [System.Threading.Thread]::Sleep(1000)
+         $result = (Invoke-WebRequest -Method "get" -Uri $url -TimeoutSec 60).Content
+         if($result.Length -eq 28 -and $result[0] -eq 72)
+         {
+            throw "HTTP error"
+         }
+
+         $glob.SuccessAttachmentsCount++
+         $glob.SuccessAttachmentsSize+=$result.Length
+         $iterate = $false
+         if([int]($glob.SuccessAttachmentsCount/100)* 100 -eq $glob.SuccessAttachmentsCount){
+            RoundRobinProxy "SuccessAttachmentsCount = $($glob.SuccessAttachmentsCount)" | out-null
+         }
+      }
+      catch {
+         $iterate = RoundRobinProxy
+         if(-not $iterate)
+         {
+            throw $_
+         }
+      }
+   }
+   $result
+}
+
+function readSrcXml ($notify){
    $zip = [System.IO.Compression.ZipFile]::Open("$(FtpStore)$($notify.zipFile)","Read")
    $entry = $zip.Entries |?{$_.FullName -match $notify.reqFile} | select -first 1 
    StreamToString $entry.Open()
@@ -311,6 +375,7 @@ function makeHtm {
       <meta charset="utf-8"/>
       <meta content="width=device-width, initial-scale=1, shrink-to-fit=no" name="viewport"/>
       <link crossorigin="anonymous" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0/css/bootstrap.min.css" integrity="sha384-Gn5384xqQ1aoWXA+058RXPxPg6fy4IWvTNh0E263XmFcJlSAwiGgFAW/dAiS6JXm" rel="stylesheet"/>
+      <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
    </head>
    <body onload='bodyLoad();'>
       <script src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/3.0.3/handlebars.js"></script>
@@ -341,14 +406,18 @@ function makeHtm {
             {{#each reg}}
             <div class="row">
                <div class="col-3">
-                  <h10><a href="{{href}}">N {{regNumber}}</a></h10>
+                  <h10><a href="{{href}}" target="_blank">N {{regNumber}}</a></h10>
                   <h5>{{maxPriceStr}}</h5>
                   <p>{{dateOpenStr}}</p>
-                  <p>   <a class="btn btn-primary"
+                  <p>   <a class="btn btn-outline-secondary btn-sm" target="_blank"
                         href="attachments/{{regNumber}}_{{notifyId}}"
                         title="{{#each attachments}}{{fileName}}
- {{/each}}">
-                        ATTACH
+{{/each}}">
+                        <i class="material-icons">folder</i>
+                     </a>
+                     <a class="btn btn-outline-secondary btn-sm" target="_blank"
+                        href="attachments/{{regNumber}}_{{notifyId}}/printForm.html">
+                        <i class="material-icons">print</i>
                      </a>           
                   </p>       
                </div>
@@ -362,7 +431,7 @@ function makeHtm {
                            {{quantity}} {{edism}} x {{priceStr}} ={{sumStr}}
                         </div>
                         <div class="col">
-                           <a href="http://help-tender.ru/okpd2.asp?id={{OKPD2Code}}">{{OKPD2Code}}</a>
+                           <a href="http://help-tender.ru/okpd2.asp?id={{OKPD2Code}}" target="_blank">{{OKPD2Code}}</a>
                            {{OKPD2}}
                         </div>
                      </div>
@@ -387,11 +456,11 @@ function _Do {
    ClearFtpZips
    # ReadZips |select -Property is_Good,regNumber,notifyId,maxPrice,dateOpen,purchaseObjectInfo,po_names,po_OKPD2s,po_OKPD2codes,attachmentsStr,ZipFile,is_Double | ogv
    # analizeOKPD2 |ogv
+   "makeHtm"
+   makeHtm |Out-File "$($glob.dir)index.htm" -Encoding UTF8
    "DownloadAttachments"
    DownloadAttachments
    #ClearAttachments
-   "makeHtm"
-   makeHtm |Out-File "$($glob.dir)index.htm" -Encoding UTF8
 
 }
 
